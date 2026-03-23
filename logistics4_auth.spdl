@@ -1,0 +1,536 @@
+hashfunction h;
+protocol LogisticsSetup(CS, OD, ET)
+{
+    role CS
+    {
+        /* ET registration secrets (Algorithm 1, Step 02) */
+        fresh IDT  : Agent;   /* Tag identity                   */
+        fresh IDC  : Agent;   /* CS identity                    */
+        fresh PKC  : Nonce;   /* CS public-key component        */
+        fresh r1   : Nonce;   /* ET nonce from Step 01          */
+        fresh r2   : Nonce;   /* CS nonce for ET reg.           */
+        /* Derived registration values for ET */
+        /* C1 = r1 ⊕ r2 */
+        /* C2 = C1 ⊕ r2 = r1  (stored by CS and ET)            */
+        /* C3 = h(IDT ∥ PKT ∥ r1) — modeled via A1,A2 below    */
+        /* C4 = IDC ⊕ h(PKC ∥ r2) — used in auth Step 04       */
+
+        /* OD registration secrets (Algorithm 2, Step 02) */
+        fresh IDO  : Agent;   /* Operator identity              */
+        fresh r3   : Nonce;   /* OD nonce from Step 01          */
+        fresh r4   : Nonce;   /* CS nonce for OD reg.           */
+        /* C7 = IDC ⊕ h(PKC ∥ r4)                              */
+
+        /* Precomputed registration values for ET */
+        fresh A1   : Nonce;   /* = h(IDT ∥ r1)                  */
+        fresh A2   : Nonce;   /* = h(A1 ∥ PKT)                  */
+
+        /* Precomputed registration values for OD */
+        fresh O1   : Nonce;   /* = h(IDO ∥ r3)                  */
+        fresh O2   : Nonce;   /* = h(O1 ∥ PKO)                  */
+
+        /* Send ET secrets securely (confidential channel) */
+        send_s1(CS, ET,
+            IDT,
+            IDC,
+            r1,
+            xor(r1, r2),            /* C1 = r1 ⊕ r2             */
+            r1,                     /* C2 = r1 (= C1 ⊕ r2)      */
+            A1,
+            A2,
+            h(IDC, h(PKC, r2))      /* C4 component             */
+        );
+
+        /* Send OD secrets securely (confidential channel) */
+        send_s2(CS, OD,
+            IDO,
+            IDC,
+            r3,
+            r4,
+            xor(IDC, h(PKC, r4)),   /* C7 = IDC ⊕ h(PKC ∥ r4)  */
+            O1,
+            O2
+        );
+
+        /* CS retains all of the above internally */
+        claim(CS, Secret, r1);
+        claim(CS, Secret, r2);
+        claim(CS, Secret, r3);
+        claim(CS, Secret, r4);
+    }
+
+    role ET
+    {
+        var IDT  : Agent;
+        var IDC  : Agent;
+        var r1   : Nonce;
+        var C1   : Nonce;
+        var C2   : Nonce;
+        var A1   : Nonce;
+        var A2   : Nonce;
+        var C4c  : Nonce;   /* C4 component                     */
+
+        recv_s1(CS, ET, IDT, IDC, r1, C1, C2, A1, A2, C4c);
+
+        claim(ET, Secret, r1);
+    }
+
+    role OD
+    {
+        var IDO  : Agent;
+        var IDC  : Agent;
+        var r3   : Nonce;
+        var r4   : Nonce;
+        var C7   : Nonce;
+        var O1   : Nonce;
+        var O2   : Nonce;
+
+        recv_s2(CS, OD, IDO, IDC, r3, r4, C7, O1, O2);
+
+        claim(OD, Secret, C7);
+    }
+}
+
+
+/* ================================================================
+ *  Phase 1 — Authentication & Key Agreement (Algorithm 3)
+ *
+ *  Message flow:
+ *    Step 01:  OD  → CS   {O3, O4, r5_masked}
+ *    Step 02:  CS  → ET   {C11, C12, r5}
+ *    Step 03:  ET  → CS   {A3, A4, A5}
+ *    Step 04:  CS  → OD   {C13, C14, C15}
+ *    Step 05:  OD  (computes SKO locally)
+ * ================================================================ */
+
+protocol LogisticsAuth(OD, CS, ET)
+{
+
+/* ------------------------------------------------------------------
+ * Role: Operator Device (OD)
+ *
+ * Pre-shared state after OD registration (Algorithm 2):
+ *   IDO  – own identity
+ *   C7   = IDC ⊕ h(PKC ∥ r4)   [long-term secret shared with CS]
+ *   O1   = h(IDO ∥ r3)
+ *   O2   = h(O1 ∥ PKO)
+ * ------------------------------------------------------------------ */
+role OD
+{
+    /* --- Long-term registration state (pre-shared with CS) --- */
+    var  IDO : Agent;       /* OD's own identity                  */
+    var  C7  : Nonce;       /* IDC ⊕ h(PKC ∥ r4)                 */
+    var  O1  : Nonce;       /* h(IDO ∥ r3)                        */
+    var  O2  : Nonce;       /* h(O1 ∥ PKO)                        */
+
+    /* --- Session-fresh value --- */
+    fresh r5 : Nonce;       /* OD session nonce                   */
+
+    /* --- Variables received from CS (Step 04) --- */
+    var  C13 : Nonce;
+    var  C14 : Nonce;
+    var  C15 : Nonce;
+
+    /*
+     * ---- Step 01: OD → CS ----------------------------------------
+     *   O3         = C7  ⊕ h(IDO ∥ r5)
+     *   O4         = IDO ⊕ h(O3 ∥ C7 ∥ r5)
+     *   r5_masked  = r5  ⊕ h(IDO ∥ C7)   [fix: allows CS to recover r5]
+     * ---------------------------------------------------------------
+     */
+    send_1(OD, CS,
+        xor(C7, h(IDO, r5)),                           /* O3         */
+        xor(IDO, h(xor(C7, h(IDO, r5)), C7, r5)),      /* O4         */
+        xor(r5, h(IDO, C7))                             /* r5 masked  */
+    );
+
+    /*
+     * ---- Step 04 recv: CS → OD -----------------------------------
+     *   Receive {C13, C14, C15}
+     *   C13 = h(C1 ∥ IDT ∥ r1)
+     *   C14 = h(C2 ∥ IDC)
+     *   C15 = h(SKC ∥ C2 ∥ C13)
+     * ---------------------------------------------------------------
+     */
+    recv_4(CS, OD, C13, C14, C15);
+
+    /*
+     * ---- Step 05: OD computes SKO locally ------------------------
+     *   O5  = h(O1 ∥ IDO ∥ r1)   [r1 is encapsulated in C13]
+     *   O6  = h(O2 ∥ IDO)
+     *   SKO = h(O5 ∥ O6 ∥ r1)
+     *   Modeled as: SKO = h(h(O1,IDO), h(O2,IDO), C13)
+     * ---------------------------------------------------------------
+     */
+
+    /* ---- Security claims ---- */
+    claim(OD, Nisynch);
+    claim(OD, Alive);
+    claim(OD, Secret, r5);
+    claim(OD, SKR,    h(h(O1, IDO), h(O2, IDO), C13));  /* SKO */
+}
+
+
+/* ------------------------------------------------------------------
+ * Role: Cloud Server (CS)
+ *
+ * Pre-shared state after ET registration (Algorithm 1):
+ *   IDT, IDC, PKC, r1, r2
+ *   C1 = r1 ⊕ r2
+ *   C2 = r1  (= C1 ⊕ r2)
+ *   C3 = h(IDT ∥ PKT ∥ r1)
+ *   C4 = IDC ⊕ h(PKC ∥ r2)
+ *
+ * Pre-shared state after OD registration (Algorithm 2):
+ *   IDO, r3, r4
+ *   C7  = IDC ⊕ h(PKC ∥ r4)
+ *   O1  = h(IDO ∥ r3)
+ * ------------------------------------------------------------------ */
+role CS
+{
+    /* --- ET registration secrets --- */
+    var  IDT : Agent;   /* Tag identity                           */
+    var  IDC : Agent;   /* CS identity                            */
+    var  PKC : Nonce;   /* CS public-key component                */
+    var  r1  : Nonce;   /* ET's original nonce                    */
+    var  r2  : Nonce;   /* CS nonce used in ET registration       */
+    var  C1  : Nonce;   /* r1 ⊕ r2                                */
+    var  C2  : Nonce;   /* Stored value = r1                      */
+    var  C3  : Nonce;   /* h(IDT ∥ PKT ∥ r1)                      */
+    var  C4  : Nonce;   /* IDC ⊕ h(PKC ∥ r2)  — for verification  */
+
+    /* --- OD registration secrets --- */
+    var  IDO : Agent;   /* Operator identity                      */
+    var  C7  : Nonce;   /* IDC ⊕ h(PKC ∥ r4)                     */
+    var  O1  : Nonce;   /* h(IDO ∥ r3)                            */
+    var  r3  : Nonce;   /* OD registration nonce                  */
+    var  r4  : Nonce;   /* CS nonce for OD registration           */
+
+    /* --- Session-fresh value --- */
+    fresh r6 : Nonce;   /* CS session nonce                       */
+
+    /* --- Variables received from OD (Step 01) --- */
+    var  O3  : Nonce;   /* C7 ⊕ h(IDO ∥ r5)                      */
+    var  O4  : Nonce;   /* IDO ⊕ h(O3 ∥ C7 ∥ r5)                 */
+    var  r5  : Nonce;   /* OD session nonce (recovered from mask) */
+
+    /* --- Variables received from ET (Step 03) --- */
+    var  A3  : Nonce;
+    var  A4  : Nonce;
+    var  A5  : Nonce;
+
+    /*
+     * ---- Step 01 recv: OD → CS -----------------------------------
+     *   O3         = C7  ⊕ h(IDO ∥ r5)           [bound to var O3]
+     *   O4         = IDO ⊕ h(O3 ∥ C7 ∥ r5)        [bound to var O4]
+     *   r5_masked  = r5  ⊕ h(IDO ∥ C7)
+     *     → CS recovers r5 = r5_masked ⊕ h(IDO ∥ C7)
+     * ---------------------------------------------------------------
+     */
+    recv_1(OD, CS,
+        O3,
+        O4,
+        xor(r5, h(IDO, C7))   /* CS recovers r5 via pattern match */
+    );
+
+    /*
+     * ---- Step 02: CS → ET ----------------------------------------
+     *   C8  = h(C3 ⊕ C7, r6)
+     *   C9  = r4 ⊕ h(IDT ∥ C1)
+     *   C10 = r3 ⊕ h(IDO ∥ O1)
+     *   C11 = h(C8 ∥ C9 ∥ r5 ∥ r6) ⊕ C7
+     *   C12 = h(C10 ∥ C11 ∥ r5 ∥ r6) ⊕ C2
+     *   r5 is forwarded so ET can compute A3
+     * ---------------------------------------------------------------
+     */
+    send_2(CS, ET,
+        /* C11 = h(C8, C9, r5, r6) ⊕ C7  */
+        xor(
+            h( h(xor(C3, C7), r6),          /* C8 = h(C3⊕C7, r6) */
+               xor(r4, h(IDT, C1)),          /* C9 = r4⊕h(IDT,C1) */
+               r5,
+               r6 ),
+            C7
+        ),
+        /* C12 = h(C10, C11, r5, r6) ⊕ C2 */
+        xor(
+            h( xor(r3, h(IDO, O1)),          /* C10 = r3⊕h(IDO,O1)*/
+               xor(                          /* C11 (recomputed)   */
+                   h( h(xor(C3, C7), r6),
+                      xor(r4, h(IDT, C1)),
+                      r5, r6 ),
+                   C7 ),
+               r5,
+               r6 ),
+            C2
+        ),
+        r5                                   /* r5 forwarded to ET */
+    );
+
+    /*
+     * ---- Step 03 recv: ET → CS -----------------------------------
+     *   A3 = h(A1, IDT, r5)
+     *   A4 = h(A2, IDT)
+     *   A5 = h(SKT ∥ A2 ∥ A3)
+     * ---------------------------------------------------------------
+     */
+    recv_3(ET, CS, A3, A4, A5);
+
+    /*
+     * ---- Step 04: CS → OD ----------------------------------------
+     *   Verify C4* = IDC ⊕ h(PKC ∥ r2) = C4  (implicit in state)
+     *   C13 = h(C1 ∥ IDT ∥ r1)
+     *   C14 = h(C2 ∥ IDC)
+     *   SKC = h(C13 ∥ C14 ∥ r1)
+     *   C15 = h(SKC ∥ C2 ∥ C13)
+     * ---------------------------------------------------------------
+     */
+    send_4(CS, OD,
+        h(C1, IDT, r1),                             /* C13            */
+        h(C2, IDC),                                 /* C14            */
+        h( h(h(C1,IDT,r1), h(C2,IDC), r1),          /* C15            */
+           C2,
+           h(C1, IDT, r1) )
+    );
+
+    /* ---- Security claims ---- */
+    claim(CS, Nisynch);
+    claim(CS, Alive);
+    claim(CS, Secret, r6);
+    claim(CS, SKR, h(h(C1,IDT,r1), h(C2,IDC), r1));  /* SKC */
+}
+
+
+/* ------------------------------------------------------------------
+ * Role: E-Tag (ET)
+ *
+ * Pre-shared state after ET registration (Algorithm 1, Step 03):
+ *   IDT  – tag identity
+ *   IDC  – cloud server identity
+ *   C2   = r1  (stored)
+ *   A1   = h(IDT ∥ r1)
+ *   A2   = h(A1 ∥ PKT)
+ *   r1   – tag's original registration nonce
+ * ------------------------------------------------------------------ */
+role ET
+{
+    /* --- Long-term registration state (pre-shared with CS) --- */
+    var  IDT : Agent;   /* Tag identity                           */
+    var  IDC : Agent;   /* CS identity                            */
+    var  C2  : Nonce;   /* Stored = r1                            */
+    var  A1  : Nonce;   /* h(IDT ∥ r1)                            */
+    var  A2  : Nonce;   /* h(A1 ∥ PKT)                            */
+    var  r1  : Nonce;   /* Registration nonce                     */
+
+    /* --- Variables received from CS (Step 02) --- */
+    var  C11 : Nonce;
+    var  C12 : Nonce;
+    var  r5  : Nonce;   /* OD nonce forwarded by CS               */
+
+    /*
+     * ---- Step 02 recv: CS → ET -----------------------------------
+     *   Verify timestamp (abstracted — Scyther models freshness
+     *   through nonce-based authentication)
+     * ---------------------------------------------------------------
+     */
+    recv_2(CS, ET, C11, C12, r5);
+
+    /*
+     * ---- Step 03: ET → CS ----------------------------------------
+     *   A3  = h(A1 ∥ IDT ∥ r5)
+     *   A4  = h(A2 ∥ IDT)
+     *   SKT = h(A3 ∥ A4 ∥ r1)
+     *   A5  = h(SKT ∥ A2 ∥ A3)
+     * ---------------------------------------------------------------
+     */
+    send_3(ET, CS,
+        h(A1, IDT, r5),                             /* A3             */
+        h(A2, IDT),                                 /* A4             */
+        h( h(h(A1,IDT,r5), h(A2,IDT), r1),          /* A5             */
+           A2,
+           h(A1, IDT, r5) )
+    );
+
+    /* ---- Security claims ---- */
+    claim(ET, Nisynch);
+    claim(ET, Alive);
+    claim(ET, Secret, r1);
+    claim(ET, SKR, h(h(A1,IDT,r5), h(A2,IDT), r1));  /* SKT */
+}
+
+}   /* end protocol LogisticsAuth */
+
+
+/* ================================================================
+ *  Phase 2 — Key Update & Re-Authentication (Section 5.6)
+ *
+ *  Message flow:
+ *    Step 01:  CS  → OD & ET   {Urq, ETrq, Authud, Tc}
+ *    Step 02:  OD  → CS        {Unew, Ucf, Tc'}
+ *    Step 03:  ET  → CS        {ETnew, ETcf, Tc''}
+ *    Step 04:  CS  verifies, computes SK'T, SK'O, SK'C
+ *              CS  → OD & ET   {h(SK'C), Tc'''}
+ *    Step 05:  OD & ET update session keys
+ * ================================================================ */
+
+protocol LogisticsKeyUpdate(CS, OD, ET)
+{
+
+/* ------------------------------------------------------------------
+ * Role: Cloud Server (CS) — Key Update Initiator
+ * ------------------------------------------------------------------ */
+role CS
+{
+    /* Current session keys (from authentication phase) */
+    var  SKC : Nonce;   /* Current session key SKC                */
+    var  C7  : Nonce;   /* Long-term OD secret                    */
+    var  C2  : Nonce;   /* Long-term ET secret                    */
+
+    fresh r7  : Nonce;  /* Fresh nonce for OD update request      */
+    fresh r8  : Nonce;  /* Fresh nonce for ET update request      */
+    fresh Tc  : Nonce;  /* Timestamp (modeled as nonce)           */
+
+    var  Unew  : Nonce; /* From OD                                */
+    var  Ucf   : Nonce; /* OD key confirmation                    */
+    var  ETnew : Nonce; /* From ET                                */
+    var  ETcf  : Nonce; /* ET key confirmation                    */
+
+    /*
+     * ---- Step 01: CS → OD and CS → ET ---------------------------
+     *   Urq    = h(C7 ∥ SKC ∥ Tc ∥ r7)
+     *   ETrq   = h(C2 ∥ SKC ∥ Tc ∥ r8)
+     *   Authud = h(SKC ∥ r7 ∥ r8 ∥ Tc)
+     * ---------------------------------------------------------------
+     */
+    send_u1(CS, OD,
+        h(C7, SKC, Tc, r7),      /* Urq   */
+        h(C2, SKC, Tc, r8),      /* ETrq  */
+        h(SKC, r7, r8, Tc),      /* Authud */
+        Tc
+    );
+    send_u1b(CS, ET,
+        h(C7, SKC, Tc, r7),      /* Urq   */
+        h(C2, SKC, Tc, r8),      /* ETrq  */
+        h(SKC, r7, r8, Tc),      /* Authud */
+        Tc
+    );
+
+    /*
+     * ---- Step 02 recv: OD → CS -----------------------------------
+     *   Unew = h(SKO ∥ r9 ∥ Tc)
+     *   Ucf  = h(Unew ∥ r7 ∥ r9)
+     * ---------------------------------------------------------------
+     */
+    recv_u2(OD, CS, Unew, Ucf);
+
+    /*
+     * ---- Step 03 recv: ET → CS -----------------------------------
+     *   ETnew = h(SKT ∥ r10 ∥ Tc)
+     *   ETcf  = h(ETnew ∥ r8 ∥ r10)
+     * ---------------------------------------------------------------
+     */
+    recv_u3(ET, CS, ETnew, ETcf);
+
+    /*
+     * ---- Step 04: CS verifies and broadcasts updated keys --------
+     *   Verify: Ucf*  = h(Unew ∥ r7 ∥ r9)  — implicit match
+     *   Verify: ETcf* = h(ETnew ∥ r8 ∥ r10) — implicit match
+     *   SK'T = h(ETnew ∥ C2 ∥ r10)
+     *   SK'O = h(Unew  ∥ C7 ∥ r9)
+     *   SK'C = h(SK'T  ∥ SK'O ∥ r7 ∥ r8)
+     *   Broadcast h(SK'C) as confirmation
+     *   (r9 and r10 are embedded in Ucf / ETcf; modeled implicitly)
+     * ---------------------------------------------------------------
+     */
+    send_u4(CS, OD, h(h(ETnew, C2), h(Unew, C7), r7, r8));
+    send_u4b(CS, ET, h(h(ETnew, C2), h(Unew, C7), r7, r8));
+
+    /* ---- Security claims ---- */
+    claim(CS, Nisynch);
+    claim(CS, SKR, h(h(ETnew,C2), h(Unew,C7), r7, r8));  /* SK'C */
+}
+
+
+/* ------------------------------------------------------------------
+ * Role: Operator Device (OD) — Key Update Responder
+ * ------------------------------------------------------------------ */
+role OD
+{
+    var  SKO   : Nonce; /* Current session key                    */
+    var  C7    : Nonce; /* Long-term CS-OD secret                 */
+
+    var  Urq   : Nonce;
+    var  ETrq  : Nonce;
+    var  Authud: Nonce;
+    var  Tc    : Nonce;
+
+    fresh r9   : Nonce; /* Fresh nonce for OD key update          */
+
+    var  SKC_new : Nonce; /* Confirmation of new key from CS      */
+
+    /*
+     * ---- Step 01 recv: CS → OD -----------------------------------
+     */
+    recv_u1(CS, OD, Urq, ETrq, Authud, Tc);
+
+    /*
+     * ---- Step 02: OD → CS ----------------------------------------
+     *   Unew = h(SKO ∥ r9 ∥ Tc)
+     *   Ucf  = h(Unew ∥ r7 ∥ r9)   [r7 embedded in Urq: recoverable
+     *          only if CS and OD share state — modeled implicitly]
+     * ---------------------------------------------------------------
+     */
+    send_u2(OD, CS,
+        h(SKO, r9, Tc),                 /* Unew               */
+        h(h(SKO, r9, Tc), Urq, r9)      /* Ucf  (r7 via Urq)  */
+    );
+
+    /*
+     * ---- Step 04 recv: CS → OD -----------------------------------
+     *   Receive h(SK'C) confirmation
+     *   OD computes SK'O = h(Unew ∥ C7 ∥ r9) and verifies
+     * ---------------------------------------------------------------
+     */
+    recv_u4(CS, OD, SKC_new);
+
+    /* ---- Security claims ---- */
+    claim(OD, Nisynch);
+    claim(OD, SKR, h(h(SKO,r9,Tc), C7, r9));  /* SK'O */
+}
+
+
+/* ------------------------------------------------------------------
+ * Role: E-Tag (ET) — Key Update Responder
+ * ------------------------------------------------------------------ */
+role ET
+{
+    var  SKT   : Nonce; /* Current session key                    */
+    var  C2    : Nonce; /* Long-term CS-ET secret                 */
+
+    var  Urq   : Nonce;
+    var  ETrq  : Nonce;
+    var  Authud: Nonce;
+    var  Tc    : Nonce;
+
+    fresh r10  : Nonce; /* Fresh nonce for ET key update          */
+
+    var  SKC_new : Nonce; /* Confirmation of new key from CS      */
+
+
+    recv_u1b(CS, ET, Urq, ETrq, Authud, Tc);
+
+
+    send_u3(ET, CS,
+        h(SKT, r10, Tc),                /* ETnew              */
+        h(h(SKT, r10, Tc), ETrq, r10)   /* ETcf (r8 via ETrq) */
+    );
+
+
+    recv_u4b(CS, ET, SKC_new);
+
+    claim(ET, Nisynch);
+    claim(ET, SKR, h(h(SKT,r10,Tc), C2, r10));  /* SK'T */
+}
+
+}
+

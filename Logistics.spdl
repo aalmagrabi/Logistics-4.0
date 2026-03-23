@@ -1,0 +1,221 @@
+protocol ThreePartyAuth(U, CS, T)
+{
+    role U
+    {
+        // Long-term secrets (stored during registration)
+        const IDU : Nonce;
+        const C7 : Nonce;
+        const O1 : Nonce;
+        const O2 : Nonce;
+        
+        // Fresh variables
+        var r5 : Nonce;
+        var ts : Timestamp;
+        var SKU : SessionKey;
+        
+        // ====================================================================
+        // Step 01: U -> CS (Authentication Request)
+        // ====================================================================
+        send_1(U, CS, 
+            Concat(
+                Concat(
+                    IDU,
+                    r5
+                ),
+                ts
+            )
+        );
+        
+        // ====================================================================
+        // Receive Step 04: CS -> U (Authentication Response)
+        // ====================================================================
+        recv_4(U, CS, 
+            Concat(
+                Concat(
+                    C13,
+                    C14
+                ),
+                Concat(
+                    C15,
+                    ts1
+                )
+            )
+        );
+        
+        // Verify timestamp freshness
+        claim(U, Fresh, ts1);
+        
+        // Derive session key
+        SKU = Hash(Concat(Concat(O1, IDU), Concat(O2, IDU)));
+        
+        // Security claims
+        claim(U, Secret, SKU);
+        claim(U, SKR, SKU);
+    }
+    
+    // ========================================================================
+    // Role: Cloud Server (CS)
+    // ========================================================================
+    role CS
+    {
+        // Long-term secrets
+        const IDT : Nonce;
+        const IDU : Nonce;
+        const C2 : Nonce;
+        const C7 : Nonce;
+        const C1 : Nonce;
+        const C3 : Nonce;
+        const C4 : Nonce;
+        const O1 : Nonce;
+        const O2 : Nonce;
+        const PKC : PublicKey;
+        
+        // Fresh variables
+        var r6 : Nonce;
+        var ts : Timestamp;
+        var SKC : SessionKey;
+        var SKT : SessionKey;
+        var SKU : SessionKey;
+        
+        // ====================================================================
+        // Receive Step 01: U -> CS
+        // ====================================================================
+        recv_1(CS, U, msg1);
+        
+        // Verify timestamp freshness (simplified)
+        claim(CS, Fresh, msg1);
+        
+        // ====================================================================
+        // Step 02: CS -> T (Forward to E-Tag)
+        // ====================================================================
+        var r6 = Nonce();
+        
+        send_2(CS, T, 
+            Concat(
+                Concat(
+                    r6,
+                    C2
+                ),
+                ts
+            )
+        );
+        
+        // ====================================================================
+        // Receive Step 03: T -> CS
+        // ====================================================================
+        recv_3(CS, T, 
+            Concat(
+                Concat(
+                    A3,
+                    A4
+                ),
+                Concat(
+                    A5,
+                    ts1
+                )
+            )
+        );
+        
+        // Verify timestamp
+        claim(CS, Fresh, ts1);
+        
+        // Compute session keys
+        SKT = Hash(Concat(A3, Concat(A4, C2)));
+        SKU = Hash(Concat(Concat(O1, IDU), Concat(O2, IDU)));
+        SKC = Hash(Concat(SKT, SKU));
+        
+        claim(CS, Secret, SKT);
+        claim(CS, Secret, SKU);
+        claim(CS, Secret, SKC);
+        
+        // ====================================================================
+        // Step 04: CS -> U
+        // ====================================================================
+        send_4(CS, U, 
+            Concat(
+                Concat(
+                    SKT,
+                    SKU
+                ),
+                Concat(
+                    SKC,
+                    ts1
+                )
+            )
+        );
+        
+        // Security claims
+        claim(CS, SKR, SKT);
+        claim(CS, SKR, SKU);
+        claim(CS, SKR, SKC);
+    }
+    
+    // ========================================================================
+    // Role: E-Tag (ET)
+    // ========================================================================
+    role T
+    {
+        // Long-term secrets (stored during registration)
+        const IDT : Nonce;
+        const IDC : Nonce;
+        const C2 : Nonce;
+        const A1 : Nonce;
+        const A2 : Nonce;
+        
+        // Fresh variables
+        var r1 : Nonce;
+        var ts : Timestamp;
+        var SKT : SessionKey;
+        
+        // ====================================================================
+        // Receive Step 02: CS -> T
+        // ====================================================================
+        recv_2(T, CS, msg2);
+        
+        // Verify timestamp freshness
+        claim(T, Fresh, msg2);
+        
+        // ====================================================================
+        // Step 03: T -> CS
+        // ====================================================================
+        var r1 = Nonce();
+        
+        // Compute A3, A4, A5
+        var A3 = Hash(Concat(A1, IDT));
+        var A4 = Hash(Concat(A2, IDT));
+        var SKT = Hash(Concat(A3, Concat(A4, r1)));
+        var A5 = Hash(Concat(SKT, Concat(A2, A3)));
+        
+        send_3(T, CS, 
+            Concat(
+                Concat(
+                    A3,
+                    A4
+                ),
+                Concat(
+                    A5,
+                    ts
+                )
+            )
+        );
+        
+        // Security claims
+        claim(T, Secret, SKT);
+        claim(T, SKR, SKT);
+    }
+}
+
+claim(ThreePartyAuth, Alive);
+claim(ThreePartyAuth, Weakagree);
+claim(ThreePartyAuth, Niagree);
+claim(ThreePartyAuth, Nisynch);
+
+
+claim(ThreePartyAuth, Secret, SKU);
+claim(ThreePartyAuth, Secret, SKC);
+claim(ThreePartyAuth, Secret, SKT);
+
+
+claim(ThreePartyAuth, Agreement, SKU);
+claim(ThreePartyAuth, Agreement, SKC);
+claim(ThreePartyAuth, Agreement, SKT);
